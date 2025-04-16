@@ -457,6 +457,7 @@ def threaded_exec(batch_range: int, batch_size: int, params: dict = {}):
         print(succeeded)
         print(len(models))
 
+from collections import defaultdict
 if __name__ == '__main__':
     # threaded_exec(batch_range, batch_size)
     
@@ -466,16 +467,38 @@ if __name__ == '__main__':
             mg.params['flatten_chance'] = 1
 
     mg = Model_Generator()
-    i = 0
-    for model in mg.load_models("conv2d_models/conv2d_batch_0.json"):
-        model.summary()
-        
-    # params = {
-    #     'dense_lb': 32, 'dense_ub': 64, 
-    #     'conv_filters_ub': 16, 
-    #     'q_chance': 1,
-    #     'probs': {'start_layers': [0, 0.33, 0, 0.33, 0.33]},
-    #     'flatten_chance': 0
-    #     }
-    # model = mg.gen_network(add_params=params, total_layers=7, callback=callback)
-    # model.summary()
+    model_data = {}
+    for batch_file in os.listdir('conv2d_models'):
+        for model in mg.load_models(f"conv2d_models/{batch_file}"):
+            # get number of layers
+            layer_cnt = 0
+            cur_data = defaultdict(int)
+            for layer in model.layers:
+                if 'conv' in layer.name or 'dense' in layer.name:
+                    if 'conv1d' in layer.name:
+                        cur_data['conv1d'] += 1
+                    if 'conv2d' in layer.name:
+                        cur_data['conv2d'] += 1
+                    if 'dense' in layer.name:
+                        cur_data['dense'] += 1
+                    layer_cnt += 1
+                elif 'activation' in layer.name:
+                    cur_data['activation'] += 1
+                elif 'pool' in layer.name:
+                    cur_data['pool'] += 1
+
+            if layer_cnt not in model_data:
+                model_data[layer_cnt] = defaultdict(int)
+            model_data[layer_cnt]['model_cnt'] += 1
+            model_data[layer_cnt]['conv'] += cur_data['conv2d'] + cur_data['conv1d']
+            model_data[layer_cnt]['dense'] += cur_data['dense']
+            model_data[layer_cnt]['conv1d'] += cur_data['conv1d']
+            model_data[layer_cnt]['conv2d'] += cur_data['conv2d']
+            model_data[layer_cnt]['activation'] += cur_data['activation']
+            model_data[layer_cnt]['pooling'] += cur_data['pool']
+            model_data[layer_cnt]['only_dense'] += int(cur_data['conv2d'] == 0 and cur_data['conv1d'] == 0)
+
+    # saves the metadata
+    serializable_model_data = {k: dict(v) for k, v in model_data.items()}
+    with open("model_layer_metadata.json", "w") as f:
+        json.dump(serializable_model_data, f, indent=2)
