@@ -4,7 +4,7 @@ import json
 from qkeras import QDense, QConv2D, QConv1D, QAveragePooling2D, QActivation, quantized_bits, QDepthwiseConv2D, QSeparableConv2D, QSeparableConv1D, QLSTM
 from keras.layers import Dense, Conv2D, Flatten, Activation, Conv1D, LSTM, Layer, Input
 from keras.models import Model, model_from_json
-from qkeras.utils import _add_supported_quantized_objects
+# from qkeras.utils import _add_supported_quantized_objects
 import keras
 import typing
 import random
@@ -15,6 +15,8 @@ from contextlib import contextmanager
 import sys, os
 import ray
 from ray.exceptions import RayTaskError
+from qkeras.quantizers import quantized_bits
+from qkeras import Clip
 
 import logging
 
@@ -30,6 +32,45 @@ def suppress_stdout():
             sys.stdout = old_stdout
 
 clip_base_2 = lambda x: 2 ** round(np.log2(x))
+
+def _add_supported_quantized_objects(co: dict):
+
+    co.update({
+        "QDense": QDense,
+        "QConv2D": QConv2D,
+        "QConv1D": QConv1D,
+        "QActivation": QActivation,
+        "QAveragePooling2D": QAveragePooling2D,
+        "QDepthwiseConv2D": QDepthwiseConv2D,
+        "QSeparableConv2D": QSeparableConv2D,
+        "QSeparableConv1D": QSeparableConv1D,
+        "quantized_bits": quantized_bits,
+        "Clip": Clip,
+        "Functional": Model,
+    })
+
+def sanitize_model_json(json_str: str) -> str:
+    model_config = json.loads(json_str)
+
+    def clean_config(layer):
+        layer_config = layer.get("config", {})
+        if layer["class_name"] == "QDepthwiseConv2D":
+            for key in ["groups", "kernel_regularizer", "kernel_constraint"]:
+                layer_config.pop(key, None)
+
+        elif layer["class_name"] == "QSeparableConv2D":
+            for key in [
+                "groups",
+                "kernel_initializer",  # <-- REMOVE THIS TOO
+                "kernel_regularizer",
+                "kernel_constraint"
+            ]:
+                layer_config.pop(key, None)
+
+    for layer in model_config.get("config", {}).get("layers", []):
+        clean_config(layer)
+
+    return json.dumps(model_config)
 
 class Model_Generator:
     failed_models = 0
@@ -298,8 +339,10 @@ class Model_Generator:
             model = Model(inputs=layers[0], outputs=layers[-1])
         
             if save_file:
-                save_file.write(model.to_json())
-                save_file.write("--------------")
+                json_models = json.dumps(model, indent=None)
+                with open(save_file, "w") as file:
+                    file.write(json_models)
+                
             return model
         
         except ValueError as e:
@@ -357,20 +400,27 @@ class Model_Generator:
             if p_type not in self.params['probs']:
                 self.params['probs'][p_type] = [.5, .5]
 
-    def load_models(self, save_file: str) -> list[Model]:
+    def load_models(self, save_file: str) -> list:
         """
-        Parses and returns an iterable of generated models
-        
-        arguments:
-        save_file -- path to batch of models
+        Parses and returns an iterable of generated models from a JSON lines file,
+        where each line contains one or more models as stringified Keras JSON configs.
+        Expects a comma separated list.
+
+        Arguments:
+        save_file -- path to JSONL file
         """
 
-        with open(save_file, "r") as chunk_file:
-            models = chunk_file.read().split("--------------")[:-1]
-            for model_desc in models:
-                co = {}
-                _add_supported_quantized_objects(co)
-                yield model_from_json(model_desc, custom_objects=co)
+        with open(save_file, "r") as f:
+            json_model_list = json.load(f)
+
+        for model_label in json_model_list:
+            model_json = json_model_list[model_label]
+            
+            co = {}
+            _add_supported_quantized_objects(co)
+
+            cleaned_json = sanitize_model_json(model_json)
+            yield model_from_json(cleaned_json, custom_objects=co)
 
 ray.init(num_cpus=os.cpu_count(), log_to_driver=False)
 
@@ -416,12 +466,16 @@ if __name__ == '__main__':
             mg.params['flatten_chance'] = 1
 
     mg = Model_Generator()
-    params = {
-        'dense_lb': 32, 'dense_ub': 64, 
-        'conv_filters_ub': 16, 
-        'q_chance': 1,
-        'probs': {'start_layers': [0, 0.33, 0, 0.33, 0.33]},
-        'flatten_chance': 0
-        }
-    model = mg.gen_network(add_params=params, total_layers=7, callback=callback)
-    model.summary()
+    i = 0
+    for model in mg.load_models("conv2d_models/conv2d_batch_0.json"):
+        model.summary()
+        
+    # params = {
+    #     'dense_lb': 32, 'dense_ub': 64, 
+    #     'conv_filters_ub': 16, 
+    #     'q_chance': 1,
+    #     'probs': {'start_layers': [0, 0.33, 0, 0.33, 0.33]},
+    #     'flatten_chance': 0
+    #     }
+    # model = mg.gen_network(add_params=params, total_layers=7, callback=callback)
+    # model.summary()
